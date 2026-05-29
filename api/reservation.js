@@ -2,99 +2,196 @@
  * Takashi Restaurant — Reservation Email API
  * Vercel Serverless Function: /api/reservation
  *
- * Receives reservation data from the website form and sends
- * a formatted email to the restaurant via Resend.
+ * Sends two emails on successful reservation:
+ *   1. Restaurant notification → RESERVATION_EMAIL
+ *   2. Customer confirmation  → customer's email (only if provided)
  *
- * Environment variables (Vercel dashboard → Settings → Environment Variables):
- *   RESEND_API_KEY      — from resend.com dashboard
- *   RESERVATION_EMAIL   — restaurant inbox, e.g. kontakt@takashi-restaurant.com
+ * Environment variables (Vercel → Settings → Environment Variables):
+ *   RESEND_API_KEY       — from resend.com dashboard
+ *   RESERVATION_EMAIL    — restaurant inbox, e.g. kontakt@takashi-restaurant.com
  *
- * No npm packages used — native fetch only.
+ * No npm packages — native fetch only.
  */
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
+const FROM_ADDRESS    = 'Takashi Website <onboarding@resend.dev>';
 
-/* ─── Build plain-text email body ───────────────────────────────────── */
-function buildEmailHtml(d) {
-  const isDE = d.language === 'de';
+/* ─── Helpers ────────────────────────────────────────────────────────── */
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function formatDate(dateStr) {
+  const p = String(dateStr).split('-');
+  return p.length === 3 ? p[2] + '.' + p[1] + '.' + p[0] : dateStr;
+}
+function formatTimestamp(iso) {
+  try {
+    return new Date(iso).toLocaleString('de-DE', {
+      day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'
+    });
+  } catch { return iso; }
+}
 
+/* ─── Restaurant notification email ─────────────────────────────────── */
+function buildRestaurantHtml(d) {
   const rows = [
-    ['Name',          d.name                    ],
-    ['Telefon',       d.phone                   ],
-    ['E-Mail',        d.email       || '–'      ],
-    ['Datum',         d.date                    ],
-    ['Uhrzeit',       d.time                    ],
-    ['Personen',      d.persons                 ],
-    ['Kommentar',     d.comment     || '–'      ],
-    ['Sprache',       d.language === 'en' ? 'Englisch' : 'Deutsch'],
-    ['Eingegangen',   new Date(d.createdAt).toLocaleString('de-DE', {
-      day: '2-digit', month: '2-digit', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    })],
+    ['Name',        d.name],
+    ['Telefon',     d.phone],
+    ['E-Mail',      d.email || '–'],
+    ['Datum',       formatDate(d.date)],
+    ['Uhrzeit',     d.time],
+    ['Personen',    d.persons + ' Person' + (parseInt(d.persons) !== 1 ? 'en' : '')],
+    ['Kommentar',   d.comment || '–'],
+    ['Sprache',     d.language === 'en' ? 'Englisch' : 'Deutsch'],
+    ['Eingegangen', formatTimestamp(d.createdAt)],
   ];
-
   const tableRows = rows.map(([label, value]) => `
     <tr>
-      <td style="padding:8px 14px;font-size:13px;color:#888;white-space:nowrap;vertical-align:top;border-bottom:1px solid #1e1e1e;">${label}</td>
-      <td style="padding:8px 14px;font-size:13px;color:#f0f0f0;vertical-align:top;border-bottom:1px solid #1e1e1e;">${value}</td>
+      <td style="padding:8px 14px;font-size:13px;color:#888;white-space:nowrap;vertical-align:top;border-bottom:1px solid #1e1e1e">${label}</td>
+      <td style="padding:8px 14px;font-size:13px;color:#f0f0f0;vertical-align:top;border-bottom:1px solid #1e1e1e">${escHtml(String(value))}</td>
     </tr>`).join('');
 
   return `<!DOCTYPE html>
-<html lang="de">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<html lang="de"><head><meta charset="UTF-8"></head>
 <body style="margin:0;padding:0;background:#0a0a0a;font-family:'Helvetica Neue',Arial,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a0a;padding:40px 16px;">
-    <tr><td align="center">
-      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#111;border:1px solid #2a2a2a;border-radius:6px;overflow:hidden;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a0a;padding:40px 16px;">
+<tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#111;border:1px solid #2a2a2a;border-radius:6px;overflow:hidden;">
+<tr><td style="background:#111;border-bottom:2px solid #C4993A;padding:26px 28px 20px;text-align:center;">
+  <div style="font-family:Georgia,serif;font-size:24px;font-weight:400;letter-spacing:.22em;color:#C4993A;text-transform:uppercase;margin-bottom:5px;">TAKASHI</div>
+  <div style="font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:rgba(196,153,58,.5);">Asiatische Küche &bull; Reutlingen</div>
+</td></tr>
+<tr><td style="padding:20px 28px 14px;border-bottom:1px solid #1e1e1e;">
+  <div style="font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:#C4993A;margin-bottom:4px;">Neue Reservierungsanfrage</div>
+  <div style="font-family:Georgia,serif;font-size:20px;font-weight:400;color:#f0f0f0;">Tischreservierung</div>
+</td></tr>
+<tr><td style="padding:6px 0;">
+  <table width="100%" cellpadding="0" cellspacing="0">${tableRows}</table>
+</td></tr>
+<tr><td style="padding:18px 28px;border-top:1px solid #1e1e1e;text-align:center;">
+  <div style="font-size:10px;color:#555;line-height:1.6;">Automatisch gesendet von <a href="https://takashi-reutlingen.de" style="color:#C4993A;text-decoration:none;">takashi-reutlingen.de</a></div>
+</td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
+}
 
-        <!-- Header -->
-        <tr>
-          <td style="background:linear-gradient(135deg,#111,#1a1a1a);border-bottom:2px solid #C4993A;padding:28px 28px 22px;text-align:center;">
-            <div style="font-family:Georgia,serif;font-size:26px;font-weight:400;letter-spacing:.24em;color:#C4993A;text-transform:uppercase;margin-bottom:6px;">
-              TAKASHI
-            </div>
-            <div style="font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:rgba(196,153,58,.5);">
-              Asiatische Küche &bull; Reutlingen
-            </div>
-          </td>
-        </tr>
+/* ─── Customer confirmation email ────────────────────────────────────── */
+function buildCustomerHtml(d) {
+  const isEN    = d.language === 'en';
+  const persons = d.persons + (isEN
+    ? (' person' + (parseInt(d.persons) !== 1 ? 's' : ''))
+    : (' Person' + (parseInt(d.persons) !== 1 ? 'en' : '')));
 
-        <!-- Title strip -->
-        <tr>
-          <td style="padding:20px 28px 16px;border-bottom:1px solid #1e1e1e;">
-            <div style="font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#C4993A;margin-bottom:4px;">
-              Neue Reservierungsanfrage
-            </div>
-            <div style="font-family:Georgia,serif;font-size:22px;font-weight:400;color:#f0f0f0;line-height:1.2;">
-              Tischreservierung
-            </div>
-          </td>
-        </tr>
+  const commentBlock = d.comment
+    ? `<tr>
+        <td style="padding:6px 14px;font-size:12px;color:#888;vertical-align:top;">${isEN ? 'Comment' : 'Kommentar'}:</td>
+        <td style="padding:6px 14px;font-size:12px;color:#ddd;vertical-align:top;">${escHtml(d.comment)}</td>
+       </tr>`
+    : '';
 
-        <!-- Data table -->
-        <tr>
-          <td style="padding:8px 14px;">
-            <table width="100%" cellpadding="0" cellspacing="0">
-              ${tableRows}
-            </table>
-          </td>
-        </tr>
+  const intro = isEN
+    ? 'Thank you for your reservation request. We have received your request and will be in touch shortly if we have any questions.'
+    : 'Vielen Dank für Ihre Reservierungsanfrage. Wir haben Ihre Anfrage erhalten und melden uns, falls es Rückfragen gibt.';
 
-        <!-- Footer -->
-        <tr>
-          <td style="padding:20px 28px;border-top:1px solid #1e1e1e;text-align:center;">
-            <div style="font-size:10px;color:#555;line-height:1.6;">
-              Diese E-Mail wurde automatisch vom Reservierungsformular auf<br>
-              <a href="https://takashi-reutlingen.de" style="color:#C4993A;text-decoration:none;">takashi-reutlingen.de</a> gesendet.
-            </div>
-          </td>
-        </tr>
+  const note = isEN
+    ? 'This is a <strong>reservation request</strong>, not a final confirmed booking. We will confirm your table by phone or email.'
+    : 'Dies ist eine <strong>Reservierungsanfrage</strong>, keine endgültige Buchungsbestätigung. Wir bestätigen Ihren Tisch telefonisch oder per E-Mail.';
 
-      </table>
+  return `<!DOCTYPE html>
+<html lang="${d.language || 'de'}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#0a0a0a;font-family:'Helvetica Neue',Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a0a;padding:40px 16px;">
+<tr><td align="center">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:500px;background:#111;border:1px solid #2a2a2a;border-radius:6px;overflow:hidden;">
+
+<tr><td style="background:linear-gradient(135deg,#111,#181818);border-bottom:2px solid #C4993A;padding:28px 28px 22px;text-align:center;">
+  <div style="font-family:Georgia,serif;font-size:26px;font-weight:400;letter-spacing:.24em;color:#C4993A;text-transform:uppercase;margin-bottom:5px;">TAKASHI</div>
+  <div style="font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:rgba(196,153,58,.5);margin-bottom:12px;">Asiatische Küche &bull; Reutlingen</div>
+  <div style="font-family:Georgia,serif;font-size:17px;font-style:italic;font-weight:300;color:rgba(237,233,227,.7);">${isEN ? 'Reservation Request' : 'Reservierungsanfrage'}</div>
+</td></tr>
+
+<tr><td style="padding:22px 28px 16px;">
+  <p style="margin:0;font-size:13px;color:#ccc;line-height:1.7;">${isEN ? 'Dear' : 'Liebe/r'} ${escHtml(d.name)},</p>
+  <p style="margin:10px 0 0;font-size:13px;color:#aaa;line-height:1.75;">${intro}</p>
+</td></tr>
+
+<tr><td style="padding:0 20px 20px;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0d0d0d;border:1px solid #2a2a2a;border-radius:6px;overflow:hidden;">
+    <tr><td colspan="2" style="padding:10px 14px 8px;background:#151515;border-bottom:1px solid #1e1e1e;">
+      <span style="font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:#C4993A;">${isEN ? 'Booking Details' : 'Ihre Angaben'}</span>
+    </td></tr>
+    <tr>
+      <td style="padding:8px 14px;font-size:12px;color:#888;white-space:nowrap;border-bottom:1px solid #1e1e1e;">${isEN ? 'Date' : 'Datum'}:</td>
+      <td style="padding:8px 14px;font-size:12px;border-bottom:1px solid #1e1e1e;"><strong style="color:#C4993A;">${formatDate(d.date)}</strong></td>
+    </tr>
+    <tr>
+      <td style="padding:8px 14px;font-size:12px;color:#888;white-space:nowrap;border-bottom:1px solid #1e1e1e;">${isEN ? 'Time' : 'Uhrzeit'}:</td>
+      <td style="padding:8px 14px;font-size:12px;border-bottom:1px solid #1e1e1e;"><strong style="color:#C4993A;">${d.time} ${isEN ? "o'clock" : 'Uhr'}</strong></td>
+    </tr>
+    <tr>
+      <td style="padding:8px 14px;font-size:12px;color:#888;white-space:nowrap;border-bottom:1px solid #1e1e1e;">${isEN ? 'Guests' : 'Personen'}:</td>
+      <td style="padding:8px 14px;font-size:12px;color:#ddd;border-bottom:1px solid #1e1e1e;">${escHtml(persons)}</td>
+    </tr>
+    ${commentBlock}
+  </table>
+</td></tr>
+
+<tr><td style="padding:0 20px 20px;">
+  <div style="background:rgba(196,153,58,.06);border:1px solid rgba(196,153,58,.2);border-radius:5px;padding:12px 14px;">
+    <p style="margin:0;font-size:11px;color:#aaa;line-height:1.65;">${note}</p>
+  </div>
+</td></tr>
+
+<tr><td style="padding:0 20px 24px;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0d0d0d;border:1px solid #2a2a2a;border-radius:6px;overflow:hidden;">
+    <tr><td colspan="2" style="padding:10px 14px 8px;background:#151515;border-bottom:1px solid #1e1e1e;">
+      <span style="font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:#C4993A;">${isEN ? 'Find Us' : 'So finden Sie uns'}</span>
+    </td></tr>
+    <tr><td style="padding:12px 14px;font-size:12px;color:#aaa;line-height:1.7;">
+      <strong style="color:#ddd;">Takashi Restaurant</strong><br>
+      Wilhelmstra&szlig;e 122<br>72764 Reutlingen<br>
+      <a href="tel:+4971213829996" style="color:#C4993A;text-decoration:none;">+49 7121 3829996</a>
     </td></tr>
   </table>
-</body>
-</html>`;
+</td></tr>
+
+<tr><td style="padding:16px 28px 20px;border-top:1px solid #1e1e1e;text-align:center;">
+  <div style="font-size:10px;color:#555;line-height:1.6;">
+    <a href="https://takashi-reutlingen.de" style="color:#C4993A;text-decoration:none;">takashi-reutlingen.de</a>
+    &nbsp;&bull;&nbsp;
+    <a href="https://www.instagram.com/takashi_restaurant_reutlingen_" style="color:#C4993A;text-decoration:none;">Instagram</a>
+  </div>
+</td></tr>
+
+</table>
+</td></tr></table>
+</body></html>`;
+}
+
+/* ─── Send one email via Resend ──────────────────────────────────────── */
+async function sendEmail(apiKey, { from, to, subject, html, replyTo }) {
+  const res = await fetch(RESEND_ENDPOINT, {
+    method:  'POST',
+    headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from,
+      to:      Array.isArray(to) ? to : [to],
+      subject,
+      html,
+      ...(replyTo ? { reply_to: replyTo } : {}),
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    const msg = (data.error && data.error.message) || data.message || 'Resend error';
+    throw new Error(msg + ' (HTTP ' + res.status + ')');
+  }
+  return data;
 }
 
 /* ─── Main handler ───────────────────────────────────────────────────── */
@@ -102,79 +199,85 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST')
     return res.status(405).json({ ok: false, error: 'Method not allowed' });
 
-  const RESEND_KEY       = process.env.RESEND_API_KEY;
-  const RESERVATION_TO   = process.env.RESERVATION_EMAIL;
+  const RESEND_KEY    = process.env.RESEND_API_KEY;
+  const RESTAURANT_TO = process.env.RESERVATION_EMAIL;
 
-  if (!RESEND_KEY) {
-    console.error('[Reservation] RESEND_API_KEY is not set');
-    return res.status(500).json({ ok: false, error: 'Email service not configured' });
-  }
-  if (!RESERVATION_TO) {
-    console.error('[Reservation] RESERVATION_EMAIL is not set');
-    return res.status(500).json({ ok: false, error: 'Recipient email not configured' });
-  }
+  if (!RESEND_KEY)    return res.status(500).json({ ok: false, error: 'RESEND_API_KEY not set' });
+  if (!RESTAURANT_TO) return res.status(500).json({ ok: false, error: 'RESERVATION_EMAIL not set' });
 
   let body;
-  try {
-    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-  } catch (e) {
-    return res.status(400).json({ ok: false, error: 'Invalid JSON body' });
-  }
+  try { body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body; }
+  catch (e) { return res.status(400).json({ ok: false, error: 'Invalid JSON body' }); }
 
   const { name, phone, email, date, time, persons, comment, language, createdAt } = body;
 
-  if (!name || !phone || !date || !time || !persons) {
-    return res.status(400).json({ ok: false, error: 'Missing required fields' });
-  }
+  if (!name || !phone || !date || !time || !persons)
+    return res.status(400).json({ ok: false, error: 'Missing required fields: name, phone, date, time, persons' });
 
-  const data = {
-    name:      name,
-    phone:     phone,
+  const d = {
+    name,
+    phone,
     email:     email     || '',
-    date:      date,
-    time:      time,
-    persons:   persons,
+    date,
+    time,
+    persons:   String(persons),   /* exact number "1"–"20" */
     comment:   comment   || '',
     language:  language  || 'de',
     createdAt: createdAt || new Date().toISOString(),
   };
 
-  const subject = `Neue Reservierung — Takashi | ${date} ${time} | ${name}`;
+  const restaurantSubject = `Neue Reservierung — Takashi | ${formatDate(d.date)} ${d.time} | ${d.name}`;
+  const customerSubject   = d.language === 'en'
+    ? `Your Reservation at Takashi — ${formatDate(d.date)} ${d.time}`
+    : `Ihre Reservierung bei Takashi — ${formatDate(d.date)} ${d.time}`;
 
+  const results = {};
+
+  /* 1. Restaurant email — mandatory */
   try {
-    const resendRes = await fetch(RESEND_ENDPOINT, {
-      method:  'POST',
-      headers: {
-        'Authorization': 'Bearer ' + RESEND_KEY,
-        'Content-Type':  'application/json',
-      },
-      body: JSON.stringify({
-        from:    'Takashi Website <onboarding@resend.dev>',
-        to:      [RESERVATION_TO],
-        subject: subject,
-        html:    buildEmailHtml(data),
-        reply_to: email || undefined,
-      }),
+    const r = await sendEmail(RESEND_KEY, {
+      from:    FROM_ADDRESS,
+      to:      RESTAURANT_TO,
+      subject: restaurantSubject,
+      html:    buildRestaurantHtml(d),
+      replyTo: d.email || undefined,
     });
-
-    const result = await resendRes.json();
-
-    if (!resendRes.ok || result.error) {
-      const errMsg = (result.error && result.error.message) || result.message || 'Resend API error';
-      console.error('[Reservation] Resend error:', errMsg, '| status:', resendRes.status);
-      return res.status(502).json({ ok: false, error: errMsg });
-    }
-
-    console.log('[Reservation] Email sent. id:', result.id, '| to:', RESERVATION_TO, '| for:', name, date, time);
-    return res.status(200).json({ ok: true, id: result.id });
-
+    results.restaurant = r.id;
+    console.log('[Reservation] Restaurant email sent id:', r.id,
+      '| for:', d.name, d.date, d.time, 'persons:', d.persons);
   } catch (err) {
-    console.error('[Reservation] fetch failed:', err.message);
+    console.error('[Reservation] Restaurant email FAILED:', err.message);
     return res.status(502).json({ ok: false, error: err.message });
   }
+
+  /* 2. Customer confirmation — optional */
+  if (d.email) {
+    try {
+      const r = await sendEmail(RESEND_KEY, {
+        from:    FROM_ADDRESS,
+        to:      d.email,
+        subject: customerSubject,
+        html:    buildCustomerHtml(d),
+      });
+      results.customer = r.id;
+      console.log('[Reservation] Customer email sent id:', r.id, '→', d.email);
+    } catch (err) {
+      /* Non-fatal — still return success */
+      console.error('[Reservation] Customer email FAILED (non-fatal):', err.message);
+      results.customerError = err.message;
+    }
+  } else {
+    console.log('[Reservation] No customer email — skipping auto-reply');
+  }
+
+  return res.status(200).json({
+    ok:         true,
+    restaurant: results.restaurant,
+    customer:   results.customer || null,
+    ...(results.customerError ? { customerError: results.customerError } : {}),
+  });
 }
