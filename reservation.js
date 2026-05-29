@@ -14,7 +14,7 @@
  */
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
-const FROM_ADDRESS    = 'Takashi Restaurant <onboarding@resend.dev>';
+const FROM_ADDRESS    = 'Takashi Website <onboarding@resend.dev>';
 
 /* ─── Helpers ────────────────────────────────────────────────────────── */
 function escHtml(str) {
@@ -175,7 +175,7 @@ function buildCustomerHtml(d) {
 
 /* ─── Send one email via Resend ──────────────────────────────────────── */
 async function sendEmail(apiKey, { from, to, subject, html, replyTo }) {
-  const res  = await fetch(RESEND_ENDPOINT, {
+  const res = await fetch(RESEND_ENDPOINT, {
     method:  'POST',
     headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -186,25 +186,10 @@ async function sendEmail(apiKey, { from, to, subject, html, replyTo }) {
       ...(replyTo ? { reply_to: replyTo } : {}),
     }),
   });
-
-  let data;
-  try { data = await res.json(); }
-  catch (e) { data = {}; }
-
-  /* Always log the full Resend response — essential for domain-verification errors */
-  console.log('[Resend] to:', Array.isArray(to) ? to.join(',') : to,
-    '| HTTP', res.status, '| response:', JSON.stringify(data));
-
+  const data = await res.json();
   if (!res.ok || data.error) {
-    /* Capture every detail Resend provides */
-    const msg = [
-      data.error?.message,
-      data.error?.name,
-      data.message,
-      data.statusCode ? 'statusCode:' + data.statusCode : null,
-      'HTTP ' + res.status,
-    ].filter(Boolean).join(' | ');
-    throw new Error(msg);
+    const msg = (data.error && data.error.message) || data.message || 'Resend error';
+    throw new Error(msg + ' (HTTP ' + res.status + ')');
   }
   return data;
 }
@@ -246,13 +231,14 @@ export default async function handler(req, res) {
   };
 
   const restaurantSubject = `Neue Reservierung — Takashi | ${formatDate(d.date)} ${d.time} | ${d.name}`;
-  /* Subject exactly as specified */
   const customerSubject   = d.language === 'en'
-    ? 'Your reservation request at Takashi'
-    : 'Ihre Reservierungsanfrage bei Takashi';
+    ? `Your Reservation at Takashi — ${formatDate(d.date)} ${d.time}`
+    : `Ihre Reservierung bei Takashi — ${formatDate(d.date)} ${d.time}`;
 
   let restaurantEmailSent = false;
+  let restaurantEmailId   = null;
   let customerEmailSent   = false;
+  let customerEmailId     = null;
 
   /* 1. Restaurant email — mandatory */
   try {
@@ -264,35 +250,39 @@ export default async function handler(req, res) {
       replyTo: d.email || undefined,
     });
     restaurantEmailSent = true;
-    console.log('[Reservation] Restaurant email sent id:', r.id,
+    restaurantEmailId   = r.id || null;
+    console.log('[Reservation] Restaurant email sent id:', restaurantEmailId,
       '| for:', d.name, d.date, d.time, 'persons:', d.persons);
   } catch (err) {
     console.error('[Reservation] Restaurant email FAILED:', err.message);
     return res.status(502).json({ ok: false, error: err.message });
   }
 
-  /* 2. Customer auto-reply — optional, non-fatal */
+  /* 2. Customer confirmation — optional */
   console.log('[Reservation] Customer email:', d.email || '(not provided — skipping auto-reply)');
 
   if (d.email) {
     try {
       const r = await sendEmail(RESEND_KEY, {
         from:    FROM_ADDRESS,
-        to:      [d.email],          /* explicit array */
+        to:      d.email,
         subject: customerSubject,
         html:    buildCustomerHtml(d),
       });
       customerEmailSent = true;
-      console.log('[Reservation] Customer auto-reply sent:', r.id, '→', d.email);
+      customerEmailId   = r.id || null;
+      console.log('[Reservation] Customer auto-reply sent:', customerEmailId, '→', d.email);
     } catch (err) {
+      /* Non-fatal — still return success */
       console.error('[Reservation] Customer auto-reply failed:', err.message);
-      /* Non-fatal — restaurant email already sent, still return success */
     }
   }
 
   return res.status(200).json({
-    ok:                  true,
+    ok:                true,
     restaurantEmailSent,
+    restaurantEmailId,
     customerEmailSent,
+    customerEmailId,
   });
 }
