@@ -14,7 +14,7 @@
  */
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
-const FROM_ADDRESS    = 'Takashi Restaurant <reservierung@takashi-restaurant.com>';
+const FROM_ADDRESS    = 'Takashi Website <onboarding@resend.dev>';
 
 /* ─── Helpers ────────────────────────────────────────────────────────── */
 function escHtml(str) {
@@ -95,12 +95,8 @@ function buildCustomerHtml(d) {
     : '';
 
   const intro = isEN
-    ? 'Thank you for your reservation request. We have received your request and will be in touch shortly if we have any questions.'
-    : 'Vielen Dank für Ihre Reservierungsanfrage. Wir haben Ihre Anfrage erhalten und melden uns, falls es Rückfragen gibt.';
-
-  const note = isEN
-    ? 'This is a <strong>reservation request</strong>, not a final confirmed booking. We will confirm your table by phone or email.'
-    : 'Dies ist eine <strong>Reservierungsanfrage</strong>, keine endgültige Buchungsbestätigung. Wir bestätigen Ihren Tisch telefonisch oder per E-Mail.';
+    ? 'Thank you for your reservation at Takashi Restaurant. Your reservation has been successfully registered and confirmed. We look forward to welcoming you on the selected date. If any questions arise, we will contact you by phone or email.'
+    : 'Vielen Dank für Ihre Reservierung bei Takashi Restaurant. Ihre Reservierung wurde erfolgreich registriert und bestätigt. Wir freuen uns, Sie am ausgewählten Datum begrüßen zu dürfen. Sollten Rückfragen entstehen, kontaktieren wir Sie telefonisch oder per E-Mail.';
 
   return `<!DOCTYPE html>
 <html lang="${d.language || 'de'}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
@@ -112,7 +108,7 @@ function buildCustomerHtml(d) {
 <tr><td style="background:linear-gradient(135deg,#111,#181818);border-bottom:2px solid #C4993A;padding:28px 28px 22px;text-align:center;">
   <div style="font-family:Georgia,serif;font-size:26px;font-weight:400;letter-spacing:.24em;color:#C4993A;text-transform:uppercase;margin-bottom:5px;">TAKASHI</div>
   <div style="font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:rgba(196,153,58,.5);margin-bottom:12px;">Asiatische Küche &bull; Reutlingen</div>
-  <div style="font-family:Georgia,serif;font-size:17px;font-style:italic;font-weight:300;color:rgba(237,233,227,.7);">${isEN ? 'Reservation Request' : 'Reservierungsanfrage'}</div>
+  <div style="font-family:Georgia,serif;font-size:17px;font-style:italic;font-weight:300;color:rgba(237,233,227,.7);">${isEN ? 'Reservation Confirmation' : 'Reservierungsbestätigung'}</div>
 </td></tr>
 
 <tr><td style="padding:22px 28px 16px;">
@@ -139,12 +135,6 @@ function buildCustomerHtml(d) {
     </tr>
     ${commentBlock}
   </table>
-</td></tr>
-
-<tr><td style="padding:0 20px 20px;">
-  <div style="background:rgba(196,153,58,.06);border:1px solid rgba(196,153,58,.2);border-radius:5px;padding:12px 14px;">
-    <p style="margin:0;font-size:11px;color:#aaa;line-height:1.65;">${note}</p>
-  </div>
 </td></tr>
 
 <tr><td style="padding:0 20px 24px;">
@@ -232,61 +222,52 @@ export default async function handler(req, res) {
 
   const restaurantSubject = `Neue Reservierung — Takashi | ${formatDate(d.date)} ${d.time} | ${d.name}`;
   const customerSubject   = d.language === 'en'
-    ? `Your Reservation at Takashi — ${formatDate(d.date)} ${d.time}`
-    : `Ihre Reservierung bei Takashi — ${formatDate(d.date)} ${d.time}`;
+    ? `Your Reservation Confirmation at Takashi — ${formatDate(d.date)} ${d.time}`
+    : `Ihre Reservierungsbestätigung bei Takashi — ${formatDate(d.date)} ${d.time}`;
 
-  /* Declare all result variables upfront — prevents any ReferenceError */
-  let restaurantEmailSent = false;
-  let restaurantEmailId   = null;
-  let customerEmailSent   = false;
-  let customerEmailId     = null;
+  const results = {};
 
-  /* 1. Restaurant email — mandatory. HTTP 502 if this fails. */
+  /* 1. Restaurant email — mandatory */
   try {
-    const restaurantResult = await sendEmail(RESEND_KEY, {
+    const r = await sendEmail(RESEND_KEY, {
       from:    FROM_ADDRESS,
       to:      RESTAURANT_TO,
       subject: restaurantSubject,
       html:    buildRestaurantHtml(d),
       replyTo: d.email || undefined,
     });
-    restaurantEmailSent = true;
-    restaurantEmailId   = restaurantResult.id || null;
-    console.log('[Reservation] Restaurant email sent id:', restaurantEmailId,
+    results.restaurant = r.id;
+    console.log('[Reservation] Restaurant email sent id:', r.id,
       '| for:', d.name, d.date, d.time, 'persons:', d.persons);
   } catch (err) {
     console.error('[Reservation] Restaurant email FAILED:', err.message);
     return res.status(502).json({ ok: false, error: err.message });
   }
 
-  /* 2. Customer auto-reply — optional, non-fatal.
-        Failure logs an error but NEVER causes HTTP 500 or 502. */
-  console.log('[Reservation] Customer email:', d.email || '(not provided — skipping auto-reply)');
-
+  /* 2. Customer confirmation — optional */
   if (d.email) {
     try {
-      const customerResult = await sendEmail(RESEND_KEY, {
+      const r = await sendEmail(RESEND_KEY, {
         from:    FROM_ADDRESS,
         to:      d.email,
         subject: customerSubject,
         html:    buildCustomerHtml(d),
       });
-      customerEmailSent = true;
-      customerEmailId   = customerResult.id || null;
-      console.log('[Reservation] Customer auto-reply sent:', customerEmailId, '→', d.email);
+      results.customer = r.id;
+      console.log('[Reservation] Customer email sent id:', r.id, '→', d.email);
     } catch (err) {
-      /* Non-fatal — restaurant email already succeeded, still return ok:true */
-      console.error('[Reservation] Customer auto-reply failed:', err.message);
+      /* Non-fatal — still return success */
+      console.error('[Reservation] Customer email FAILED (non-fatal):', err.message);
+      results.customerError = err.message;
     }
   } else {
     console.log('[Reservation] No customer email — skipping auto-reply');
   }
 
   return res.status(200).json({
-    ok:                 true,
-    restaurantEmailSent,
-    restaurantEmailId,
-    customerEmailSent,
-    customerEmailId,
+    ok:         true,
+    restaurant: results.restaurant,
+    customer:   results.customer || null,
+    ...(results.customerError ? { customerError: results.customerError } : {}),
   });
 }
