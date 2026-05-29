@@ -14,7 +14,7 @@
  */
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
-const FROM_ADDRESS    = 'Takashi Website <onboarding@resend.dev>';
+const FROM_ADDRESS    = 'Takashi Website <reservierung@takashi-restaurant.com>';
 
 /* ─── Helpers ────────────────────────────────────────────────────────── */
 function escHtml(str) {
