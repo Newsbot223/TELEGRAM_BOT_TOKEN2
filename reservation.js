@@ -14,7 +14,7 @@
  */
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
-const FROM_ADDRESS = 'Takashi Restaurant <reservierung@takashi-restaurant.com>';
+const FROM_ADDRESS    = 'Takashi Restaurant <reservierung@takashi-restaurant.com>';
 
 /* ─── Helpers ────────────────────────────────────────────────────────── */
 function escHtml(str) {
@@ -235,14 +235,15 @@ export default async function handler(req, res) {
     ? `Your Reservation at Takashi — ${formatDate(d.date)} ${d.time}`
     : `Ihre Reservierung bei Takashi — ${formatDate(d.date)} ${d.time}`;
 
+  /* Declare all result variables upfront — prevents any ReferenceError */
   let restaurantEmailSent = false;
   let restaurantEmailId   = null;
   let customerEmailSent   = false;
   let customerEmailId     = null;
 
-  /* 1. Restaurant email — mandatory */
+  /* 1. Restaurant email — mandatory. HTTP 502 if this fails. */
   try {
-    const r = await sendEmail(RESEND_KEY, {
+    const restaurantResult = await sendEmail(RESEND_KEY, {
       from:    FROM_ADDRESS,
       to:      RESTAURANT_TO,
       subject: restaurantSubject,
@@ -250,7 +251,7 @@ export default async function handler(req, res) {
       replyTo: d.email || undefined,
     });
     restaurantEmailSent = true;
-    restaurantEmailId   = r.id || null;
+    restaurantEmailId   = restaurantResult.id || null;
     console.log('[Reservation] Restaurant email sent id:', restaurantEmailId,
       '| for:', d.name, d.date, d.time, 'persons:', d.persons);
   } catch (err) {
@@ -258,28 +259,31 @@ export default async function handler(req, res) {
     return res.status(502).json({ ok: false, error: err.message });
   }
 
-  /* 2. Customer confirmation — optional */
+  /* 2. Customer auto-reply — optional, non-fatal.
+        Failure logs an error but NEVER causes HTTP 500 or 502. */
   console.log('[Reservation] Customer email:', d.email || '(not provided — skipping auto-reply)');
 
   if (d.email) {
     try {
-      const r = await sendEmail(RESEND_KEY, {
+      const customerResult = await sendEmail(RESEND_KEY, {
         from:    FROM_ADDRESS,
         to:      d.email,
         subject: customerSubject,
         html:    buildCustomerHtml(d),
       });
       customerEmailSent = true;
-      customerEmailId   = r.id || null;
+      customerEmailId   = customerResult.id || null;
       console.log('[Reservation] Customer auto-reply sent:', customerEmailId, '→', d.email);
     } catch (err) {
-      /* Non-fatal — still return success */
+      /* Non-fatal — restaurant email already succeeded, still return ok:true */
       console.error('[Reservation] Customer auto-reply failed:', err.message);
     }
+  } else {
+    console.log('[Reservation] No customer email — skipping auto-reply');
   }
 
   return res.status(200).json({
-    ok:                true,
+    ok:                 true,
     restaurantEmailSent,
     restaurantEmailId,
     customerEmailSent,
