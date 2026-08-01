@@ -361,16 +361,17 @@ function buildWhatsAppLink(e164Phone, message) {
   return `https://wa.me/${waPhone}?text=${encodeURIComponent(message)}`;
 }
 
-/* Maps a status key to which per-order flag guards its WhatsApp button,
-   so handleCallback can trigger the same mechanism for several statuses
-   without duplicating the send/guard logic. */
+/* Maps a WhatsApp "type" to which per-order flag guards its button, so
+   handleCallback can trigger the same sendWhatsAppButton() mechanism for
+   several statuses without duplicating the send/guard logic. */
 const WHATSAPP_NOTIFIED_FLAG = {
   accepted:   'notifiedAccepted',
   on_the_way: 'notifiedOnTheWay'
 };
 
-/* Customer-facing WhatsApp message text, per status. Kept as functions so
-   the name can be interpolated without building every message eagerly. */
+/* Customer-facing WhatsApp message text, per type ("accepted" / "on_the_way").
+   Kept as functions so the name can be interpolated without building every
+   message eagerly. */
 const WHATSAPP_CUSTOMER_MESSAGE = {
   accepted: (name) => [
     `Hallo ${name}! 👋`,
@@ -390,7 +391,7 @@ const WHATSAPP_CUSTOMER_MESSAGE = {
   ].join('\n')
 };
 
-/* Group-facing label shown above the WhatsApp button, per status. */
+/* Group-facing label shown above the WhatsApp button, per type. */
 const WHATSAPP_GROUP_LABEL = {
   accepted:   '✅ *Accepted*',
   on_the_way: '🚗 *Driver left*'
@@ -401,9 +402,9 @@ const WHATSAPP_GROUP_LABEL = {
    Returns true on (best-effort) success, false if it was skipped or failed
    — the caller uses this to decide whether a retry should be allowed, and
    in all cases the rest of the order flow keeps working either way. */
-async function sendWhatsAppButton(chatId, customer, TOKEN, statusKey) {
-  const buildMessage = WHATSAPP_CUSTOMER_MESSAGE[statusKey];
-  if (!buildMessage) return false; // unknown/unsupported status — nothing to send
+async function sendWhatsAppButton(chatId, customer, TOKEN, type) {
+  const buildMessage = WHATSAPP_CUSTOMER_MESSAGE[type];
+  if (!buildMessage) return false; // unknown/unsupported type — nothing to send
 
   const name = customer && customer.name ? String(customer.name).trim() : 'Kunde';
   const phone = normalizePhoneForWhatsApp(customer && customer.phone);
@@ -420,7 +421,7 @@ async function sendWhatsAppButton(chatId, customer, TOKEN, statusKey) {
   /* Group-facing message intentionally omits the phone number — staff
      only need the name and the one-tap button to reach the customer. */
   const text = [
-    WHATSAPP_GROUP_LABEL[statusKey] || 'Status update',
+    WHATSAPP_GROUP_LABEL[type] || 'Status update',
     `Customer: ${name}`,
     ``,
     `Tap the button below to open WhatsApp.`
