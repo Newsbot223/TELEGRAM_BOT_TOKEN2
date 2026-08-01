@@ -374,28 +374,27 @@ const WHATSAPP_NOTIFIED_FLAG = {
    message eagerly. */
 const WHATSAPP_CUSTOMER_MESSAGE = {
   accepted: (name) => [
-    `Hallo ${name}! \u{1F44B}`,
+    `Hallo ${name}! 👋`,
     ``,
     `Ihre Bestellung wurde angenommen.`,
     ``,
     `Wir beginnen jetzt mit der Zubereitung Ihrer Bestellung.`,
     ``,
-    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! \u{1F363}`
+    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! 🍣`
   ].join('\n'),
-
   on_the_way: (name) => [
-    `Hallo ${name}! \u{1F44B}`,
+    `Hallo ${name}! 👋`,
     ``,
-    `Ihre Bestellung ist jetzt unterwegs und wird in Kürze bei Ihnen eintreffen. \u{1F697}`,
+    `Ihre Bestellung ist jetzt unterwegs und wird in Kürze bei Ihnen eintreffen. 🚗`,
     ``,
-    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! \u{1F363}`
+    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! 🍣`
   ].join('\n')
 };
 
 /* Group-facing label shown above the WhatsApp button, per type. */
 const WHATSAPP_GROUP_LABEL = {
-  accepted:   '✅ *Accepted*',
-  on_the_way: '🚗 *Driver left*'
+  accepted: '✅ Accepted',
+  on_the_way: '🛵 Driver left'
 };
 
 /* Send a NEW Telegram message (does not touch the original status message)
