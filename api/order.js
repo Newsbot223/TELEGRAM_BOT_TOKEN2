@@ -374,20 +374,20 @@ const WHATSAPP_NOTIFIED_FLAG = {
    message eagerly. */
 const WHATSAPP_CUSTOMER_MESSAGE = {
   accepted: (name) => [
-    `Hallo ${name}! 👋`,
+    `Hallo ${name}! `,
     ``,
     `Ihre Bestellung wurde angenommen.`,
     ``,
     `Wir beginnen jetzt mit der Zubereitung Ihrer Bestellung.`,
     ``,
-    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! 🍣`
+    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! `
   ].join('\n'),
   on_the_way: (name) => [
-    `Hallo ${name}! 👋`,
+    `Hallo ${name}! `,
     ``,
-    `Ihre Bestellung ist jetzt unterwegs und wird in Kürze bei Ihnen eintreffen. 🚗`,
+    `Ihre Bestellung ist jetzt unterwegs und wird in Kürze bei Ihnen eintreffen. `,
     ``,
-    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! 🍣`
+    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! `
   ].join('\n')
 };
 
