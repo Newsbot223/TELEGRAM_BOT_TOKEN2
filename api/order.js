@@ -112,15 +112,18 @@ async function callTelegramApi(TOKEN, method, payload, context) {
     return null;
   }
 
-if (!data.ok) {
-  if (data.description?.includes('message is not modified')) {
-    return data;
+  if (!data.ok) {
+    if (data.description?.includes('message is not modified')) {
+      return data;
+    }
+
+    console.error(
+      `[Proxy] ${context}: Telegram API error —`,
+      data.description || 'unknown error'
+    );
   }
 
-  console.error(
-    `[Proxy] ${context}: Telegram API error —`,
-    data.description || 'unknown error'
-  );
+  return data;
 }
 
 /* ─── Main handler ─── */
@@ -185,6 +188,7 @@ module.exports = async function handler(req, res) {
       chat_id:           chat_id,
       payload:           _orderPayload,
       createdAt:         Date.now(),
+      notifiedAccepted:  false,
       notifiedOnTheWay:  false
     });
   } else if (orderId) {
@@ -281,14 +285,17 @@ if (
   );
 }
 
-    /* WhatsApp handoff (on_the_way) — no Twilio/Meta API, just a wa.me deep-link
-       sent as a NEW Telegram message with an inline button. Guarded by
-       notifiedOnTheWay so a double-tap on the button (or a Telegram retry)
-       can't send the customer's staff-facing button twice. */
-    if (statusKey === 'on_the_way' && stored && stored.payload && stored.payload.customer && !stored.notifiedOnTheWay) {
-      stored.notifiedOnTheWay = true; // set before awaiting to shrink the race window
-      const sent = await sendWhatsAppButton(chatId, stored.payload.customer, TOKEN);
-      if (!sent) stored.notifiedOnTheWay = false; // allow retry on next press if it failed
+    /* WhatsApp handoff (accepted / on_the_way) — no Twilio/Meta API, just a
+       wa.me deep-link sent as a NEW Telegram message with an inline button.
+       Guarded by a per-status "notified" flag so a double-tap on the button
+       (or a Telegram retry) can't send the customer's staff-facing button
+       twice. Both statuses share the same sendWhatsAppButton() mechanism —
+       only the message text differs, picked internally by statusKey. */
+    const notifiedFlagKey = WHATSAPP_NOTIFIED_FLAG[statusKey];
+    if (notifiedFlagKey && stored && stored.payload && stored.payload.customer && !stored[notifiedFlagKey]) {
+      stored[notifiedFlagKey] = true; // set before awaiting to shrink the race window
+      const sent = await sendWhatsAppButton(chatId, stored.payload.customer, TOKEN, statusKey);
+      if (!sent) stored[notifiedFlagKey] = false; // allow retry on next press if it failed
     }
 
     /* Order lifecycle is complete — free the entry instead of waiting for
@@ -354,12 +361,50 @@ function buildWhatsAppLink(e164Phone, message) {
   return `https://wa.me/${waPhone}?text=${encodeURIComponent(message)}`;
 }
 
+/* Maps a status key to which per-order flag guards its WhatsApp button,
+   so handleCallback can trigger the same mechanism for several statuses
+   without duplicating the send/guard logic. */
+const WHATSAPP_NOTIFIED_FLAG = {
+  accepted:   'notifiedAccepted',
+  on_the_way: 'notifiedOnTheWay'
+};
+
+/* Customer-facing WhatsApp message text, per status. Kept as functions so
+   the name can be interpolated without building every message eagerly. */
+const WHATSAPP_CUSTOMER_MESSAGE = {
+  accepted: (name) => [
+    `Hallo ${name}! 👋`,
+    ``,
+    `Ihre Bestellung wurde angenommen.`,
+    ``,
+    `Wir beginnen jetzt mit der Zubereitung Ihrer Bestellung.`,
+    ``,
+    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! 🍣`
+  ].join('\n'),
+  on_the_way: (name) => [
+    `Hallo ${name}! 👋`,
+    ``,
+    `Ihre Bestellung ist jetzt unterwegs und wird in Kürze bei Ihnen eintreffen. 🚗`,
+    ``,
+    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! 🍣`
+  ].join('\n')
+};
+
+/* Group-facing label shown above the WhatsApp button, per status. */
+const WHATSAPP_GROUP_LABEL = {
+  accepted:   '✅ *Accepted*',
+  on_the_way: '🚗 *Driver left*'
+};
+
 /* Send a NEW Telegram message (does not touch the original status message)
    with a button that opens a prefilled WhatsApp chat with the customer.
    Returns true on (best-effort) success, false if it was skipped or failed
    — the caller uses this to decide whether a retry should be allowed, and
    in all cases the rest of the order flow keeps working either way. */
-async function sendWhatsAppButton(chatId, customer, TOKEN) {
+async function sendWhatsAppButton(chatId, customer, TOKEN, statusKey) {
+  const buildMessage = WHATSAPP_CUSTOMER_MESSAGE[statusKey];
+  if (!buildMessage) return false; // unknown/unsupported status — nothing to send
+
   const name = customer && customer.name ? String(customer.name).trim() : 'Kunde';
   const phone = normalizePhoneForWhatsApp(customer && customer.phone);
 
@@ -369,20 +414,13 @@ async function sendWhatsAppButton(chatId, customer, TOKEN) {
     return false;
   }
 
-  const waMessage = [
-    `Hallo ${name}! 👋`,
-    ``,
-    `Ihre Bestellung ist jetzt unterwegs und wird in Kürze bei Ihnen eintreffen. 🚗`,
-    ``,
-    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! 🍣`
-  ].join('\n');
-
+  const waMessage = buildMessage(name);
   const waLink = buildWhatsAppLink(phone, waMessage);
 
   /* Group-facing message intentionally omits the phone number — staff
      only need the name and the one-tap button to reach the customer. */
   const text = [
-    `🚗 *Driver left*`,
+    WHATSAPP_GROUP_LABEL[statusKey] || 'Status update',
     `Customer: ${name}`,
     ``,
     `Tap the button below to open WhatsApp.`
