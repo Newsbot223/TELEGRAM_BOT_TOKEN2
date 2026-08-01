@@ -112,11 +112,15 @@ async function callTelegramApi(TOKEN, method, payload, context) {
     return null;
   }
 
-  if (!data.ok) {
-    // Telegram's `description` field is safe to log — it never contains the token.
-    console.error(`[Proxy] ${context}: Telegram API error —`, data.description || 'unknown error');
+if (!data.ok) {
+  if (data.description?.includes('message is not modified')) {
+    return data;
   }
-  return data;
+
+  console.error(
+    `[Proxy] ${context}: Telegram API error —`,
+    data.description || 'unknown error'
+  );
 }
 
 /* ─── Main handler ─── */
@@ -228,22 +232,54 @@ async function handleCallback(cbq, TOKEN, res) {
 
   if (msgId && chatId) {
     /* Edit original message: update status line */
-    const originalText = message && typeof message.text === 'string' ? message.text : '';
-    const newText = originalText.replace(
-      /📌 \*Status:\*.*$/m,
-      '📌 *Status:* ' + statusText
-    );
+const originalText =
+  message && typeof message.text === 'string'
+    ? message.text
+    : '';
 
-    await callTelegramApi(TOKEN, 'editMessageText', {
-      chat_id:    chatId,
+let newText = originalText;
+
+// Пытаемся заменить существующий статус
+if (/📌 \*?Status:?\*?/i.test(originalText)) {
+  newText = originalText.replace(
+    /📌 \*?Status:?\*?.*$/m,
+    `📌 *Status:* ${statusText}`
+  );
+} else {
+  // Если статуса нет — просто добавляем его
+  newText = `${originalText}\n\n📌 *Status:* ${statusText}`;
+}
+
+// Не пытаемся редактировать сообщение, если ничего не изменилось
+const replyMarkup =
+  statusKey === 'delivered'
+    ? {
+        inline_keyboard: [[
+          {
+            text: '✅ Delivered — Abgeschlossen',
+            callback_data: 'noop'
+          }
+        ]]
+      }
+    : buildButtons(orderId);
+
+if (
+  newText !== originalText ||
+  statusKey === 'delivered'
+) {
+  await callTelegramApi(
+    TOKEN,
+    'editMessageText',
+    {
+      chat_id: chatId,
       message_id: msgId,
-      text:       newText || originalText,
+      text: newText,
       parse_mode: 'Markdown',
-      /* Keep buttons but grey out completed one by removing them after delivery */
-      reply_markup: statusKey === 'delivered' ? { inline_keyboard: [[
-        { text: '✅ Delivered — Abgeschlossen', callback_data: 'noop' }
-      ]] } : buildButtons(orderId)
-    }, 'editMessageText');
+      reply_markup: replyMarkup
+    },
+    'editMessageText'
+  );
+}
 
     /* WhatsApp handoff (on_the_way) — no Twilio/Meta API, just a wa.me deep-link
        sent as a NEW Telegram message with an inline button. Guarded by
