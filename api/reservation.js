@@ -14,7 +14,7 @@
  */
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
-const FROM_ADDRESS    = 'Takashi Website <takashi.reutlingen122@gmail.com>';
+const FROM_ADDRESS    = 'Takashi Website <reservierung@takashi-restaurant.com>';
 
 /* ─── Helpers ────────────────────────────────────────────────────────── */
 function escHtml(str) {
@@ -73,7 +73,7 @@ function buildRestaurantHtml(d) {
   <table width="100%" cellpadding="0" cellspacing="0">${tableRows}</table>
 </td></tr>
 <tr><td style="padding:18px 28px;border-top:1px solid #1e1e1e;text-align:center;">
-  <div style="font-size:10px;color:#555;line-height:1.6;">Automatisch gesendet von <a href="https://takashi-reutlingen.de" style="color:#C4993A;text-decoration:none;">takashi-reutlingen.de</a></div>
+  <div style="font-size:10px;color:#555;line-height:1.6;">Automatisch gesendet von <a href="https://takashi-restaurant.com" style="color:#C4993A;text-decoration:none;">takashi-restaurant.com</a></div>
 </td></tr>
 </table>
 </td></tr></table>
@@ -152,7 +152,7 @@ function buildCustomerHtml(d) {
 
 <tr><td style="padding:16px 28px 20px;border-top:1px solid #1e1e1e;text-align:center;">
   <div style="font-size:10px;color:#555;line-height:1.6;">
-    <a href="https://takashi-reutlingen.de" style="color:#C4993A;text-decoration:none;">takashi-reutlingen.de</a>
+    <a href="https://takashi-restaurant.com" style="color:#C4993A;text-decoration:none;">takashi-restaurant.com</a>
     &nbsp;&bull;&nbsp;
     <a href="https://www.instagram.com/takashi_restaurant_reutlingen_" style="color:#C4993A;text-decoration:none;">Instagram</a>
   </div>
