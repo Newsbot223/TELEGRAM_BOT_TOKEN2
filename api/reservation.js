@@ -14,7 +14,7 @@
  */
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
-const FROM_ADDRESS    = 'Takashi Website <rtakashi.reutlingen122@gmail.com>';
+const FROM_ADDRESS    = 'Takashi Website <takashi.reutlingen122@gmail.com>';
 
 /* ─── Helpers ────────────────────────────────────────────────────────── */
 function escHtml(str) {
