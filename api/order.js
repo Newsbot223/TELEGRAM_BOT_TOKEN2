@@ -50,6 +50,40 @@
  *    X-Telegram-Bot-Api-Secret-Token header (configure this token via
  *    Telegram's setWebhook `secret_token` param). If unset, this check is
  *    skipped — existing deployments keep working without changes.
+ *
+ *  PERSISTENCE — Supabase (fixes the "WhatsApp button missing on later
+ *  orders" bug caused by serverless instances not sharing memory):
+ *    SUPABASE_URL                — your project's REST URL
+ *                                   (https://<project>.supabase.co)
+ *    SUPABASE_SERVICE_ROLE_KEY   — service role key (NOT the anon key —
+ *                                   this proxy needs to bypass RLS to
+ *                                   read/write orders from the server side)
+ *
+ *    Create the table once in the Supabase SQL editor:
+ *
+ *      create table takashi_orders (
+ *        order_id           text primary key,
+ *        message_id         bigint not null,
+ *        chat_id             bigint not null,
+ *        payload             jsonb not null,
+ *        notified_accepted   boolean not null default false,
+ *        notified_on_the_way boolean not null default false,
+ *        created_at          timestamptz not null default now()
+ *      );
+ *
+ *    No client library is used (plain REST via fetch, PostgREST), so no
+ *    new npm dependency is required.
+ *
+ *    Recommended index (order_id already has one via the primary key):
+ *      create index takashi_orders_created_at_idx on takashi_orders (created_at);
+ *
+ *    RLS: the table is only ever touched with the SERVICE ROLE key, which
+ *    bypasses Row Level Security by design — so no policy is functionally
+ *    required. As defense-in-depth (in case the anon/public key is ever
+ *    used against this project), it's still recommended to:
+ *      alter table takashi_orders enable row level security;
+ *    ...and simply add no policies — RLS with zero policies denies all
+ *    access to non-service-role callers while leaving this proxy unaffected.
  * ══════════════════════════════════════════════════════════════
  */
 
@@ -59,15 +93,32 @@
 const TELEGRAM_API = 'https://api.telegram.org/bot';
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET; // optional, see header docs
 
-/* In-memory store for message_id ↔ orderId mapping.
+/* Shared fetch timeout wrapper (used by both Telegram and Supabase calls).
+   Without this, a hung TCP connection could stall the whole request until
+   the platform's own function timeout kills it, wasting the entire budget
+   on a single call. Aborting early lets the existing try/catch paths in
+   callTelegramApi/sbFetch handle it exactly like any other network error
+   (log + return null) — no behavior change on the happy path. */
+const FETCH_TIMEOUT_MS = 8000;
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* In-process WARM CACHE for message_id ↔ orderId mapping.
    Using a Map (not a plain object) so a crafted orderId like "__proto__"
    or "constructor" can never touch Object.prototype.
-   NOTE: this is still per-process memory — on serverless platforms
-   (Vercel/Netlify) each cold start gets a fresh, empty store, and status
-   edits/WhatsApp buttons for orders placed on a different instance will
-   silently no-op. Replace with a real DB (Supabase, Redis, KV) in
-   production; the TTL cleanup below only bounds memory for long-lived
-   processes (e.g. the local dev server). */
+   Supabase (below) is now the source of truth, so this Map is purely a
+   speed-up for repeat callback presses that happen to land on the same
+   warm instance — it is never the only place an order lives. Losing it
+   on a cold start / different instance is harmless: handleCallback falls
+   back to Supabase automatically. The TTL cleanup below only bounds
+   memory for long-lived processes (e.g. the local dev server). */
 const messageStore = new Map();
 const ORDER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const STORE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
@@ -84,6 +135,134 @@ function cleanupStaleOrders() {
   }
 }
 
+/* ─── Supabase persistence (source of truth for order data) ───
+   Plain REST calls (PostgREST) via the built-in fetch — no client library,
+   so no new npm dependency. Every function is best-effort: on missing
+   config or a network/API error it logs and returns null/false rather
+   than throwing, so a Supabase outage degrades to "no WhatsApp button"
+   instead of breaking Telegram status updates. */
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_TABLE = 'takashi_orders';
+
+// Trim a trailing slash so a SUPABASE_URL set with or without one both work.
+const SUPABASE_BASE = SUPABASE_URL ? SUPABASE_URL.replace(/\/+$/, '') : SUPABASE_URL;
+
+async function sbFetch(path, options = {}) {
+  if (!SUPABASE_BASE || !SUPABASE_KEY) {
+    console.error('[Proxy] Supabase not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing)');
+    return null;
+  }
+  let res;
+  try {
+    res = await fetchWithTimeout(`${SUPABASE_BASE}/rest/v1/${path}`, {
+      ...options,
+      headers: {
+        'apikey':        SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type':  'application/json',
+        ...(options.headers || {})
+      }
+    });
+  } catch (err) {
+    console.error(`[Proxy] Supabase ${options.method || 'GET'} ${path.split('?')[0]}: network error —`, err.name === 'AbortError' ? 'timed out' : err.message);
+    return null;
+  }
+
+  if (!res.ok) {
+    /* Parse out just the error message/code — never log the raw response
+       body verbatim, since PostgREST can echo back submitted values
+       (which may include customer name/phone) in some constraint errors. */
+    const errText = await res.text().catch(() => '');
+    let errDetail = 'unknown error';
+    try {
+      const errJson = JSON.parse(errText);
+      errDetail = errJson.message || errJson.hint || errJson.code || errDetail;
+    } catch { /* non-JSON body — keep generic detail, don't log raw text */ }
+    console.error(`[Proxy] Supabase ${options.method || 'GET'} ${path.split('?')[0]} failed (${res.status}) —`, errDetail);
+    return null;
+  }
+  if (res.status === 204) return true; // no content, e.g. return=minimal
+  return res.json().catch(() => true);
+}
+
+/* Upsert (insert-or-update) the order row. Used both for the initial save
+   and to keep notified_* flags in sync across instances. */
+async function saveOrderToSupabase(orderId, entry) {
+  const row = {
+    order_id:            orderId,
+    message_id:          entry.message_id,
+    chat_id:              entry.chat_id,
+    payload:              entry.payload,
+    notified_accepted:    Boolean(entry.notifiedAccepted),
+    notified_on_the_way:  Boolean(entry.notifiedOnTheWay)
+  };
+  return sbFetch(`${SUPABASE_TABLE}?on_conflict=order_id`, {
+    method:  'POST',
+    headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+    body:    JSON.stringify(row)
+  });
+}
+
+/* Load a single order by id. Returns the same shape previously produced
+   by messageStore.get(orderId), or null if not found / on error. */
+async function getOrderFromSupabase(orderId) {
+  const rows = await sbFetch(`${SUPABASE_TABLE}?order_id=eq.${encodeURIComponent(orderId)}&select=*&limit=1`, { method: 'GET' });
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    message_id:        row.message_id,
+    chat_id:            row.chat_id,
+    payload:            row.payload,
+    notifiedAccepted:   Boolean(row.notified_accepted),
+    notifiedOnTheWay:   Boolean(row.notified_on_the_way),
+    createdAt:          row.created_at ? new Date(row.created_at).getTime() : Date.now()
+  };
+}
+
+/* Persist a single notified_* flag update (best-effort). */
+async function updateNotifiedFlagInSupabase(orderId, flagKey, value) {
+  const column = flagKey === 'notifiedAccepted' ? 'notified_accepted' : 'notified_on_the_way';
+  return sbFetch(`${SUPABASE_TABLE}?order_id=eq.${encodeURIComponent(orderId)}`, {
+    method:  'PATCH',
+    headers: { 'Prefer': 'return=minimal' },
+    body:    JSON.stringify({ [column]: value })
+  });
+}
+
+/* Atomically "claims" a notified_* flag: flips it false → true only if it
+   is still false at the moment Postgres evaluates the row filter. This is
+   the authoritative guard against duplicate WhatsApp messages — a plain
+   read-then-write (as used elsewhere for speed) has a race window where
+   two near-simultaneous callbacks (a fast double-tap, a Telegram retry, or
+   two different serverless instances) can both read "not yet notified"
+   before either writes back. Using the WHERE filter as part of the UPDATE
+   closes that window: only the request that actually performs the flip
+   gets a row back in the response; the loser gets an empty array and
+   knows to skip sending. Returns true if this call won the claim. */
+async function claimNotifiedFlag(orderId, flagKey) {
+  const column = flagKey === 'notifiedAccepted' ? 'notified_accepted' : 'notified_on_the_way';
+  const rows = await sbFetch(
+    `${SUPABASE_TABLE}?order_id=eq.${encodeURIComponent(orderId)}&${column}=eq.false`,
+    {
+      method:  'PATCH',
+      headers: { 'Prefer': 'return=representation' },
+      body:    JSON.stringify({ [column]: true })
+    }
+  );
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+/* Delivered orders may optionally be removed from Supabase — mirrors the
+   old messageStore.delete() cleanup. Idempotent: safe to call even if the
+   row doesn't exist (e.g. it was already deleted by a concurrent request). */
+async function deleteOrderFromSupabase(orderId) {
+  return sbFetch(`${SUPABASE_TABLE}?order_id=eq.${encodeURIComponent(orderId)}`, {
+    method:  'DELETE',
+    headers: { 'Prefer': 'return=minimal' }
+  });
+}
+
 /* ─── Shared Telegram API caller ───
    Centralizes the fetch + error handling that used to be duplicated across
    sendMessage / answerCallbackQuery / editMessageText call sites. Never
@@ -94,13 +273,13 @@ function cleanupStaleOrders() {
 async function callTelegramApi(TOKEN, method, payload, context) {
   let res;
   try {
-    res = await fetch(`${TELEGRAM_API}${TOKEN}/${method}`, {
+    res = await fetchWithTimeout(`${TELEGRAM_API}${TOKEN}/${method}`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(payload)
     });
   } catch (err) {
-    console.error(`[Proxy] ${context}: network error —`, err.message);
+    console.error(`[Proxy] ${context}: network error —`, err.name === 'AbortError' ? 'timed out' : err.message);
     return null;
   }
 
@@ -180,17 +359,21 @@ module.exports = async function handler(req, res) {
 
   /* Store message_id so we can edit it when admin presses a button.
      orderId is validated first so it can never be used as an unsafe Map
-     key or, later, interpolated unescaped into callback_data/messages. */
+     key or, later, interpolated unescaped into callback_data/messages.
+     Saved to Supabase (source of truth, survives cold starts / other
+     instances) and mirrored into the local warm cache (speed-up only). */
   const orderId = _orderPayload && _orderPayload.orderId;
   if (data.ok && data.result && orderId && ORDER_ID_PATTERN.test(orderId)) {
-    messageStore.set(orderId, {
+    const entry = {
       message_id:       data.result.message_id,
       chat_id:           chat_id,
       payload:           _orderPayload,
       createdAt:         Date.now(),
       notifiedAccepted:  false,
       notifiedOnTheWay:  false
-    });
+    };
+    messageStore.set(orderId, entry);
+    await saveOrderToSupabase(orderId, entry); // awaited: the function may freeze right after res is sent
   } else if (orderId) {
     console.warn('[Proxy] Order not stored — orderId failed validation');
   }
@@ -229,8 +412,16 @@ async function handleCallback(cbq, TOKEN, res) {
   const [, statusKey, orderId] = match;
   const statusText = STATUS_LABELS[statusKey];
 
-  /* Look up the stored message */
-  const stored = messageStore.get(orderId);
+  /* Look up the stored message — check the warm local cache first, and
+     fall back to Supabase (source of truth) on a miss, e.g. a cold start
+     or a callback landing on a different serverless instance than the one
+     that created the order. This is what fixes WhatsApp buttons no longer
+     appearing after the first order. */
+  let stored = messageStore.get(orderId);
+  if (!stored) {
+    stored = await getOrderFromSupabase(orderId);
+    if (stored) messageStore.set(orderId, stored); // warm the cache for this instance
+  }
   const msgId  = (stored && stored.message_id) || (message && message.message_id);
   const chatId = (stored && stored.chat_id)    || (message && message.chat && message.chat.id);
 
@@ -287,21 +478,40 @@ if (
 
     /* WhatsApp handoff (accepted / on_the_way) — no Twilio/Meta API, just a
        wa.me deep-link sent as a NEW Telegram message with an inline button.
-       Guarded by a per-status "notified" flag so a double-tap on the button
-       (or a Telegram retry) can't send the customer's staff-facing button
-       twice. Both statuses share the same sendWhatsAppButton() mechanism —
-       only the message text differs, picked internally by statusKey. */
+       Guarded by an ATOMIC claim on the per-status "notified" flag so a
+       double-tap on the button, a Telegram retry, or two different
+       serverless instances handling near-simultaneous callbacks can never
+       send the customer's staff-facing button twice — a plain read-then-
+       write here would leave a race window since the read (local cache or
+       Supabase) and the write aren't one operation. Both statuses share
+       the same sendWhatsAppButton() mechanism — only the message text
+       differs, picked internally by statusKey. */
     const notifiedFlagKey = WHATSAPP_NOTIFIED_FLAG[statusKey];
     if (notifiedFlagKey && stored && stored.payload && stored.payload.customer && !stored[notifiedFlagKey]) {
-      stored[notifiedFlagKey] = true; // set before awaiting to shrink the race window
-      const sent = await sendWhatsAppButton(chatId, stored.payload.customer, TOKEN, statusKey);
-      if (!sent) stored[notifiedFlagKey] = false; // allow retry on next press if it failed
+      const claimed = await claimNotifiedFlag(orderId, notifiedFlagKey);
+      if (claimed) {
+        stored[notifiedFlagKey] = true;
+        messageStore.set(orderId, stored);
+        const sent = await sendWhatsAppButton(chatId, stored.payload.customer, TOKEN, statusKey);
+        if (!sent) {
+          // Release the claim so a later retry (this or another instance) can still send it.
+          stored[notifiedFlagKey] = false;
+          messageStore.set(orderId, stored);
+          await updateNotifiedFlagInSupabase(orderId, notifiedFlagKey, false);
+        }
+      } else {
+        // Another concurrent request already won the claim — just sync the local cache.
+        stored[notifiedFlagKey] = true;
+        messageStore.set(orderId, stored);
+      }
     }
 
     /* Order lifecycle is complete — free the entry instead of waiting for
-       the 24h sweep, but only for orders we actually have in the store. */
-    if (statusKey === 'delivered' && stored) {
+       the 24h sweep. Always attempt the Supabase delete (cheap, idempotent)
+       even if this instance didn't have it cached locally. */
+    if (statusKey === 'delivered') {
       messageStore.delete(orderId);
+      await deleteOrderFromSupabase(orderId);
     }
   }
 
