@@ -37,13 +37,13 @@
  *  CHAT ID (already hardcoded in index.html frontend):
  *    -5262422113  (Takashi group)
  *
- *  WHATSAPP HANDOFF (status:on_the_way):
- *    No Twilio / Meta Cloud API needed. When "Driver left" is pressed, the
- *    proxy sends a NEW Telegram message to the group containing a button
- *    that deep-links staff into a prefilled WhatsApp chat with the customer
- *    (wa.me/<phone>?text=...). The phone number is validated first; if it's
- *    missing or not a plausible number, the button is silently skipped and
- *    the rest of the flow (status edit, etc.) is unaffected.
+ *  CUSTOMER STATUS EMAILS (replaces the old WhatsApp handoff):
+ *    Every status change (order received, accepted, cooking, driver
+ *    left, delivered) sends the customer an email via the isolated
+ *    system in ../lib/email/ (see notifyCustomer.js there for the
+ *    full design). Sending happens AFTER this file's HTTP response
+ *    and is fully wrapped in try/catch, so an email-provider issue
+ *    can never affect order creation, Telegram, or the PDF receipt.
  *
  *  OPTIONAL — TELEGRAM_WEBHOOK_SECRET:
  *    If set, incoming webhook calls must include a matching
@@ -57,6 +57,7 @@
    Works as-is on Vercel / Netlify / local Express
 ───────────────────────────────────────────────── */
 const PDFDocument = require('pdfkit'); // npm i pdfkit — used only to render the receipt PDF below
+const { notifyCustomer } = require('../lib/email/notifyCustomer'); // customer status emails — see lib/email/ for the whole isolated system
 
 const TELEGRAM_API = 'https://api.telegram.org/bot';
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET; // optional, see header docs
@@ -436,14 +437,36 @@ module.exports = async function handler(req, res) {
       chat_id:           chat_id,
       payload:           _orderPayload,
       createdAt:         Date.now(),
-      notifiedAccepted:  false,
-      notifiedOnTheWay:  false
+      /* Tracks which statuses a customer email has already gone out
+         for, so a Telegram webhook retry (or, later, a re-click in
+         the Admin Dashboard) can never double-send. Replaces the old
+         notifiedAccepted/notifiedOnTheWay flags used for WhatsApp. */
+      notifiedStatuses: { new: false, accepted: false, cooking: false, on_the_way: false, delivered: false }
     });
   } else if (orderId) {
     console.warn('[Proxy] Order not stored — orderId failed validation');
   }
 
+  /* Respond to the customer FIRST. Everything below this line is
+     best-effort and must never delay or affect the response they've
+     already received. */
   res.status(200).json(data);
+
+  /* Order-confirmation email. Runs after the response on purpose —
+     see lib/email/notifyCustomer.js's header comment for why this is
+     safe on Vercel's Node runtime (the function stays alive until it
+     returns, even though res.json() already flushed to the client).
+     Wrapped in try/catch so an email-provider outage can never affect
+     order creation, Telegram, or the PDF above. */
+  const stored = orderId && messageStore.get(orderId);
+  if (stored && !stored.notifiedStatuses.new) {
+    try {
+      await notifyCustomer(_orderPayload, 'new');
+      stored.notifiedStatuses.new = true;
+    } catch (err) {
+      console.error('[Proxy] Order-confirmation email failed —', err.message);
+    }
+  }
 };
 
 /* Strictly whitelists the shape of callback_data we accept:
@@ -535,17 +558,26 @@ if (
   );
 }
 
-    /* WhatsApp handoff (accepted / on_the_way) — no Twilio/Meta API, just a
-       wa.me deep-link sent as a NEW Telegram message with an inline button.
-       Guarded by a per-status "notified" flag so a double-tap on the button
-       (or a Telegram retry) can't send the customer's staff-facing button
-       twice. Both statuses share the same sendWhatsAppButton() mechanism —
-       only the message text differs, picked internally by statusKey. */
-    const notifiedFlagKey = WHATSAPP_NOTIFIED_FLAG[statusKey];
-    if (notifiedFlagKey && stored && stored.payload && stored.payload.customer && !stored[notifiedFlagKey]) {
-      stored[notifiedFlagKey] = true; // set before awaiting to shrink the race window
-      const sent = await sendWhatsAppButton(chatId, stored.payload.customer, TOKEN, statusKey);
-      if (!sent) stored[notifiedFlagKey] = false; // allow retry on next press if it failed
+    /* Respond to Telegram's webhook now — everything below is
+       best-effort and must never delay this response or the message
+       edit above. */
+    res.status(200).json({ ok: true });
+
+    /* Customer status email — replaces the old WhatsApp handoff at
+       this exact point in the flow. Fires for accepted / cooking /
+       on_the_way / delivered ("new" is emailed from the order-creation
+       handler above, not here). Guarded by notifiedStatuses so a
+       Telegram webhook retry can never double-send.
+       notifyCustomer() is storage-independent (takes the order object,
+       not an ID or a Map reference) and failure-isolated (never
+       throws past this try/catch) — see lib/email/notifyCustomer.js. */
+    if (stored && stored.payload && stored.notifiedStatuses && !stored.notifiedStatuses[statusKey]) {
+      try {
+        await notifyCustomer(stored.payload, statusKey);
+        stored.notifiedStatuses[statusKey] = true;
+      } catch (err) {
+        console.error(`[Proxy] Status email (${statusKey}) failed —`, err.message);
+      }
     }
 
     /* Order lifecycle is complete — free the entry instead of waiting for
@@ -553,6 +585,7 @@ if (
     if (statusKey === 'delivered' && stored) {
       messageStore.delete(orderId);
     }
+    return;
   }
 
   res.status(200).json({ ok: true });
@@ -568,123 +601,6 @@ function buildButtons(orderId) {
       { text: '✅ Delivered',   callback_data: 'status:delivered:'  + orderId }
     ]]
   };
-}
-
-/* ─── WhatsApp helpers (no Twilio / Meta API — plain wa.me deep-link) ─── */
-
-/* Germany is Takashi's home market, so a local number written with a
-   single leading "0" (e.g. "0151 2345678") is assumed to be German unless
-   it's already international ("+..." or "00..."). Adjust if the customer
-   base isn't primarily German numbers. */
-const DEFAULT_COUNTRY_CODE = '49';
-
-/* E.164-ish check: "+" then 8–15 digits, first digit 1-9. Good enough to
-   filter out empty/garbage input without pulling in a full phone-number
-   parsing library for a single wa.me link. */
-const E164_PATTERN = /^\+[1-9]\d{7,14}$/;
-
-/* Turn messy user input ("0151 234-56 78", "0049 (151) 2345678", "00491512345678")
-   into an E.164-style string ("+491512345678"), or null if it can't be
-   confidently normalized. Never throws. */
-function normalizePhoneForWhatsApp(rawPhone) {
-  if (!rawPhone) return null;
-
-  let cleaned = String(rawPhone).trim().replace(/[\s\-()]/g, '');
-  if (!cleaned) return null;
-
-  if (cleaned.startsWith('00')) {
-    cleaned = '+' + cleaned.slice(2);
-  } else if (/^0\d+$/.test(cleaned)) {
-    cleaned = '+' + DEFAULT_COUNTRY_CODE + cleaned.slice(1);
-  }
-
-  return cleaned;
-}
-
-function isValidWhatsAppPhone(phone) {
-  return E164_PATTERN.test(phone);
-}
-
-/* wa.me wants digits only (no "+"). */
-function buildWhatsAppLink(e164Phone, message) {
-  const waPhone = e164Phone.replace(/^\+/, '');
-  return `https://wa.me/${waPhone}?text=${encodeURIComponent(message)}`;
-}
-
-/* Maps a WhatsApp "type" to which per-order flag guards its button, so
-   handleCallback can trigger the same sendWhatsAppButton() mechanism for
-   several statuses without duplicating the send/guard logic. */
-const WHATSAPP_NOTIFIED_FLAG = {
-  accepted:   'notifiedAccepted',
-  on_the_way: 'notifiedOnTheWay'
-};
-
-/* Customer-facing WhatsApp message text, per type ("accepted" / "on_the_way").
-   Kept as functions so the name can be interpolated without building every
-   message eagerly. */
-const WHATSAPP_CUSTOMER_MESSAGE = {
-  accepted: (name) => [
-    `Hallo ${name}! `,
-    ``,
-    `Ihre Bestellung wurde angenommen.`,
-    ``,
-    `Wir beginnen jetzt mit der Zubereitung Ihrer Bestellung.`,
-    ``,
-    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! `
-  ].join('\n'),
-  on_the_way: (name) => [
-    `Hallo ${name}! `,
-    ``,
-    `Ihre Bestellung ist jetzt unterwegs und wird in Kürze bei Ihnen eintreffen. `,
-    ``,
-    `Vielen Dank für Ihre Bestellung bei Takashi Restaurant! `
-  ].join('\n')
-};
-
-/* Group-facing label shown above the WhatsApp button, per type. */
-const WHATSAPP_GROUP_LABEL = {
-  accepted: '✅ Accepted',
-  on_the_way: '🛵 Driver left'
-};
-
-/* Send a NEW Telegram message (does not touch the original status message)
-   with a button that opens a prefilled WhatsApp chat with the customer.
-   Returns true on (best-effort) success, false if it was skipped or failed
-   — the caller uses this to decide whether a retry should be allowed, and
-   in all cases the rest of the order flow keeps working either way. */
-async function sendWhatsAppButton(chatId, customer, TOKEN, type) {
-  const buildMessage = WHATSAPP_CUSTOMER_MESSAGE[type];
-  if (!buildMessage) return false; // unknown/unsupported type — nothing to send
-
-  const name = customer && customer.name ? String(customer.name).trim() : 'Kunde';
-  const phone = normalizePhoneForWhatsApp(customer && customer.phone);
-
-  if (!phone || !isValidWhatsAppPhone(phone)) {
-    // Never log the raw phone number — just note that it was unusable.
-    console.warn('[Proxy] Skipping WhatsApp button — missing or invalid customer phone number');
-    return false;
-  }
-
-  const waMessage = buildMessage(name);
-  const waLink = buildWhatsAppLink(phone, waMessage);
-
-  /* Group-facing message intentionally omits the phone number — staff
-     only need the name and the one-tap button to reach the customer. */
-  const text = [
-    WHATSAPP_GROUP_LABEL[type] || 'Status update',
-    `Customer: ${name}`,
-    ``,
-    `Tap the button below to open WhatsApp.`
-  ].join('\n');
-
-  const data = await callTelegramApi(TOKEN, 'sendMessage', {
-    chat_id:      chatId,
-    text,
-    parse_mode:   'Markdown',
-    reply_markup: { inline_keyboard: [[{ text: '💬 WhatsApp', url: waLink }]] }
-  }, 'WhatsApp button sendMessage');
-
-  return Boolean(data && data.ok);
 }
 
 /* ─────────────────────────────────────────────────
