@@ -41,9 +41,12 @@
  *    Every status change (order received, accepted, cooking, driver
  *    left, delivered) sends the customer an email via the isolated
  *    system in ../lib/email/ (see notifyCustomer.js there for the
- *    full design). Sending happens AFTER this file's HTTP response
- *    and is fully wrapped in try/catch, so an email-provider issue
- *    can never affect order creation, Telegram, or the PDF receipt.
+ *    full design). Sent BEFORE this file's HTTP response — same
+ *    order reservation.js already uses successfully — and fully
+ *    wrapped in try/catch, so an email-provider issue can never turn
+ *    into a failed order creation, a broken Telegram flow, or a
+ *    missing PDF receipt; it only ever costs a missing email, which
+ *    gets logged.
  *
  *  OPTIONAL — TELEGRAM_WEBHOOK_SECRET:
  *    If set, incoming webhook calls must include a matching
@@ -447,17 +450,18 @@ module.exports = async function handler(req, res) {
     console.warn('[Proxy] Order not stored — orderId failed validation');
   }
 
-  /* Respond to the customer FIRST. Everything below this line is
-     best-effort and must never delay or affect the response they've
-     already received. */
-  res.status(200).json(data);
-
-  /* Order-confirmation email. Runs after the response on purpose —
-     see lib/email/notifyCustomer.js's header comment for why this is
-     safe on Vercel's Node runtime (the function stays alive until it
-     returns, even though res.json() already flushed to the client).
-     Wrapped in try/catch so an email-provider outage can never affect
-     order creation, Telegram, or the PDF above. */
+  /* Order-confirmation email — sent BEFORE the HTTP response.
+     REGRESSION FIX: this previously ran after res.json(), on the
+     assumption that Vercel keeps the function running until it
+     returns. That turned out to be unreliable in production — the
+     execution environment can be frozen shortly after the response
+     is sent, killing the in-flight request to the email provider
+     before it completes. This is exactly why reservation.js (which
+     works) always awaits its emails before responding — matching
+     that proven order here. Still fully failure-isolated: an email
+     failure is caught and logged, never turned into an error
+     response — the order itself was already created successfully
+     via Telegram above. */
   const stored = orderId && messageStore.get(orderId);
   if (stored && !stored.notifiedStatuses.new) {
     try {
@@ -468,6 +472,8 @@ module.exports = async function handler(req, res) {
       console.error('[Proxy] Order-confirmation email failed —', err.message);
     }
   }
+
+  res.status(200).json(data);
 };
 
 /* Strictly whitelists the shape of callback_data we accept:
@@ -559,19 +565,16 @@ if (
   );
 }
 
-    /* Respond to Telegram's webhook now — everything below is
-       best-effort and must never delay this response or the message
-       edit above. */
-    res.status(200).json({ ok: true });
-
     /* Customer status email — replaces the old WhatsApp handoff at
        this exact point in the flow. Fires for accepted / cooking /
        on_the_way / delivered ("new" is emailed from the order-creation
        handler above, not here). Guarded by notifiedStatuses so a
        Telegram webhook retry can never double-send.
-       notifyCustomer() is storage-independent (takes the order object,
-       not an ID or a Map reference) and failure-isolated (never
-       throws past this try/catch) — see lib/email/notifyCustomer.js. */
+       REGRESSION FIX: sent BEFORE acknowledging the webhook now — see
+       the matching comment in the main handler above. Telegram
+       tolerates a slightly slower webhook ack fine; it does not
+       tolerate a request that silently never completes because the
+       execution environment froze right after res.json(). */
     if (stored && stored.payload && stored.notifiedStatuses && !stored.notifiedStatuses[statusKey]) {
       try {
         const result = await notifyCustomer(stored.payload, statusKey);
@@ -581,6 +584,8 @@ if (
         console.error(`[Proxy] Status email (${statusKey}) failed —`, err.message);
       }
     }
+
+    res.status(200).json({ ok: true });
 
     /* Order lifecycle is complete — free the entry instead of waiting for
        the 24h sweep, but only for orders we actually have in the store. */
