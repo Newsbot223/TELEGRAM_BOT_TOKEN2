@@ -461,7 +461,8 @@ module.exports = async function handler(req, res) {
   const stored = orderId && messageStore.get(orderId);
   if (stored && !stored.notifiedStatuses.new) {
     try {
-      await notifyCustomer(_orderPayload, 'new');
+      const result = await notifyCustomer(_orderPayload, 'new');
+      console.log('[Email Result]', result);
       stored.notifiedStatuses.new = true;
     } catch (err) {
       console.error('[Proxy] Order-confirmation email failed —', err.message);
@@ -573,7 +574,8 @@ if (
        throws past this try/catch) — see lib/email/notifyCustomer.js. */
     if (stored && stored.payload && stored.notifiedStatuses && !stored.notifiedStatuses[statusKey]) {
       try {
-        await notifyCustomer(stored.payload, statusKey);
+        const result = await notifyCustomer(stored.payload, statusKey);
+        console.log('[Email Result]', result);
         stored.notifiedStatuses[statusKey] = true;
       } catch (err) {
         console.error(`[Proxy] Status email (${statusKey}) failed —`, err.message);
